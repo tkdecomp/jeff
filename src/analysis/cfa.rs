@@ -630,13 +630,34 @@ impl AnalyzerState {
                                 let max_except_end = first + first_info.full_size;
                                 // if second is within the bounds of first (a C func with exception handling) and max_except_end (the known max end of said C func),
                                 // delete it, and set first's end to max end
+                                // on a re-split the functions come from symbols.txt and can end
+                                // before the .pdata range does.
+                                // .pdata wins: merge every non-.pdata function inside the range into first
                                 if first <= second && second < max_except_end {
-                                    assert_eq!(
-                                        first_end, max_except_end,
-                                        "Expected end {:?}, calculated end {:?}",
-                                        max_except_end, first
-                                    );
-                                    c_exception_truncations.push((first, second, max_except_end));
+                                    if first_end != max_except_end {
+                                        log::debug!(
+                                            "Function {} with C exception handling ends at {}, extending to {}",
+                                            first,
+                                            first_end,
+                                            max_except_end
+                                        );
+                                    }
+                                    for (&inner, _) in self.functions.range(second..max_except_end)
+                                    {
+                                        if !obj.pdata_funcs.contains_key(&inner) {
+                                            c_exception_truncations.push((
+                                                first,
+                                                inner,
+                                                max_except_end,
+                                            ));
+                                        }
+                                    }
+                                    while iter
+                                        .peek()
+                                        .is_some_and(|&(&next, _)| next < max_except_end)
+                                    {
+                                        iter.next();
+                                    }
                                     continue;
                                 }
                             }

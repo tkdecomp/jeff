@@ -311,6 +311,17 @@ where
         ins.code & 0xFF
     )?;
 
+    // a full 32-bit absolute reloc can't be an instruction operand on PPC, so this is data
+    // inside code, like an MSVC jump table right after its bctr. write it as data
+    if let Some(reloc) = reloc
+        && reloc.kind == ObjRelocKind::Absolute
+    {
+        write!(w, ".4byte ")?;
+        write_reloc_symbol(w, symbols, reloc)?;
+        writeln!(w)?;
+        return Ok(());
+    }
+
     if let Some(reloc) = reloc {
         // Zero out relocations
         ins.code = match reloc.kind {
@@ -1052,10 +1063,14 @@ where
             write!(w, ", \"wa\", @nobits")?;
         }
         name => {
-            log::warn!("Unknown section {name}");
+            // other PE sections (.tls, .XBMOVIE, .idata, .XBLD, .reloc on 360): flags from the section kind
+            log::debug!("Section {name} has no predefined flags, using its kind");
             write!(w, ".section {}", section.name)?;
-            if section.kind == ObjSectionKind::Bss {
-                write!(w, ", \"\", @nobits")?;
+            match section.kind {
+                ObjSectionKind::Code => write!(w, ", \"ax\"")?,
+                ObjSectionKind::Data => write!(w, ", \"wa\"")?,
+                ObjSectionKind::ReadOnlyData => write!(w, ", \"a\"")?,
+                ObjSectionKind::Bss => write!(w, ", \"wa\", @nobits")?,
             }
         }
     };
@@ -1116,6 +1131,95 @@ mod tests {
             kind,
             ..Default::default()
         }
+    }
+
+    /// Jump table entries inside code are written as .4byte, not decoded as instructions.
+    #[test]
+    fn test_write_ins_absolute_reloc_in_code_is_data() {
+        let symbols = vec![ObjSymbol {
+            name: "$LN82315CBC".to_string(),
+            kind: ObjSymbolKind::Unknown,
+            ..Default::default()
+        }];
+        let reloc = ObjReloc {
+            kind: ObjRelocKind::Absolute,
+            target_symbol: 0,
+            addend: 0,
+            module: None,
+        };
+        // 0x82315CBC decodes as `lwz r17, 0x5cbc(r17)`
+        let ins = Ins::new(0x82315CBC, Extensions::xenon());
+        let mut out = Vec::new();
+        write_ins(
+            &mut out,
+            &symbols,
+            0x82315BC4,
+            ins,
+            Some(&reloc),
+            0x3075C4,
+            None,
+        )
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains(".4byte $LN82315CBC"), "{out}");
+        assert!(!out.contains("lwz"), "{out}");
+        assert!(
+            out.starts_with("/* 82315BC4 003075C4  82 31 5C BC */"),
+            "{out}"
+        );
+    }
+
+    /// Sections without predefined flags get them from their kind.
+    #[test]
+    fn test_write_section_header_flags_from_kind() {
+        let header = |name: &str, kind: ObjSectionKind| {
+            let section = ObjSection {
+                name: name.to_string(),
+                kind,
+                address: 0x830D9E00,
+                size: 0x10,
+                align: 4,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            write_section_header(&mut out, &section, 0, 0x830D9E00, 0x830D9E10).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        assert!(header(".tls", ObjSectionKind::Data).contains(".section .tls, \"wa\"\n"));
+        assert!(header(".XBLD", ObjSectionKind::ReadOnlyData).contains(".section .XBLD, \"a\"\n"));
+        assert!(header(".tbss", ObjSectionKind::Bss).contains(".section .tbss, \"wa\", @nobits\n"));
+        assert!(header(".text2", ObjSectionKind::Code).contains(".section .text2, \"ax\"\n"));
+    }
+
+    /// Half-word relocations don't turn an instruction into data.
+    #[test]
+    fn test_write_ins_addr16_reloc_stays_instruction() {
+        let symbols = vec![ObjSymbol {
+            name: "$LN82315BC4".to_string(),
+            kind: ObjSymbolKind::Unknown,
+            ..Default::default()
+        }];
+        let reloc = ObjReloc {
+            kind: ObjRelocKind::PpcAddr16Ha,
+            target_symbol: 0,
+            addend: 0,
+            module: None,
+        };
+        // lis r12, 0x8231
+        let ins = Ins::new(0x3D808231, Extensions::xenon());
+        let mut out = Vec::new();
+        write_ins(
+            &mut out,
+            &symbols,
+            0x82315BAC,
+            ins,
+            Some(&reloc),
+            0x3075AC,
+            None,
+        )
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("lis r12, $LN82315BC4@ha"), "{out}");
     }
 
     /// Test that find_symbol_kind returns the symbol's kind when a Start entry is present.

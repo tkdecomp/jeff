@@ -110,7 +110,7 @@ impl XexOptionalHeaderData {
             data[index + 4..index + 8].to_vec()
         } else {
             let len = mask * 4;
-            let start: usize = (value + 4) as usize;
+            let start: usize = value as usize;
             let end: usize = (value + len) as usize;
             data[start..end].to_vec()
         };
@@ -122,6 +122,7 @@ pub enum XexOptionalHeader {
     ResourceInfo { info: Vec<ResourceInfo> },
     BaseFileFormat { format: BaseFileFormat },
     // BaseReference = 0x405,
+    // DiscProfileID = 0x4304,
     DeltaPatchDescriptor { descriptor: DeltaPatchDescriptor },
     // BoundingPath = 0x80FF,
     // DeviceID = 0x8105,
@@ -229,6 +230,9 @@ pub fn parse_xex_optional_headers(xex_data: &[u8]) -> Result<Vec<XexOptionalHead
             0x405 => {
                 log::debug!("TODO: implement BaseReference")
             }
+            0x4304 => {
+                log::debug!("TODO: implement DiscProfileID")
+            }
             0x5FF => {
                 xex_optional_headers.push(XexOptionalHeader::DeltaPatchDescriptor {
                     descriptor: DeltaPatchDescriptor {
@@ -310,7 +314,7 @@ pub fn parse_xex_optional_headers(xex_data: &[u8]) -> Result<Vec<XexOptionalHead
             }
             0x18002 => {
                 xex_optional_headers.push(XexOptionalHeader::ChecksumTimestamp {
-                    timestamp: read_word(&header.data, 0),
+                    timestamp: read_word(&header.data, 4),
                 });
             }
             0x18102 => {

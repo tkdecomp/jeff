@@ -527,13 +527,64 @@ impl Tracker {
         let mut addr = SectionAddress::new(section_index, section.address);
         for chunk in section.data.as_chunks::<4>().0 {
             let value = u32::from_be_bytes(chunk[0..4].try_into()?);
-            if let Some(value) = self.is_valid_address(obj, addr, value) {
+            if let Some(value) = self.is_valid_address(obj, addr, value)
+                && !self.overlaps_non_pointer_data(obj, addr)
+            {
                 self.relocations
                     .insert(addr, Relocation::Absolute(RelocationTarget::Address(value)));
             }
             addr += 4;
         }
         Ok(())
+    }
+
+    /// True if the word at `addr` can't be a pointer even though its value looks like one:
+    /// code reads part of it as a byte or halfword, or it crosses an object boundary,
+    /// or it sits inside byte/halfword/string data.
+    fn overlaps_non_pointer_data(&self, obj: &ObjInfo, addr: SectionAddress) -> bool {
+        for offset in 0..4 {
+            if matches!(
+                self.data_types.get(&(addr + offset)),
+                Some(DataKind::Byte | DataKind::Half)
+            ) {
+                return true;
+            }
+        }
+        let start = addr.address;
+        let end = start + 4;
+        // symbols that start before the end of the word
+        for (_, symbol) in obj
+            .symbols
+            .for_section_range(addr.section, ..end)
+            .rev()
+            .take(8)
+        {
+            if symbol.kind != ObjSymbolKind::Object || symbol.size == 0 {
+                continue;
+            }
+            let symbol_end = symbol.address + symbol.size;
+            if symbol_end <= start {
+                continue;
+            }
+            if symbol.address > start || symbol_end < end {
+                return true;
+            }
+            if matches!(
+                symbol.data_kind,
+                ObjDataKind::Byte
+                    | ObjDataKind::Byte2
+                    | ObjDataKind::Short
+                    | ObjDataKind::String
+                    | ObjDataKind::ShiftJIS
+                    | ObjDataKind::String16
+                    | ObjDataKind::StringTable
+                    | ObjDataKind::ShiftJISTable
+                    | ObjDataKind::String16Table
+            ) {
+                return true;
+            }
+        }
+        false
     }
 
     fn is_valid_address(
@@ -744,5 +795,79 @@ fn data_kind_from_op(op: Opcode) -> DataKind {
         Opcode::Stwux => DataKind::Word,
         Opcode::Stwx => DataKind::Word,
         _ => DataKind::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RDATA: u32 = 0x82000000;
+    const TEXT: u32 = 0x82010000;
+
+    fn make_obj(rdata: Vec<u8>, symbols: Vec<ObjSymbol>) -> ObjInfo {
+        let sections = vec![
+            ObjSection {
+                name: ".rdata".into(),
+                kind: ObjSectionKind::ReadOnlyData,
+                address: RDATA,
+                size: rdata.len() as u32,
+                data: rdata,
+                align: 0x10000,
+                ..Default::default()
+            },
+            ObjSection {
+                name: ".text".into(),
+                kind: ObjSectionKind::Code,
+                address: TEXT,
+                size: 0x100,
+                data: vec![0; 0x100],
+                align: 0x10000,
+                ..Default::default()
+            },
+        ];
+        ObjInfo::new(ObjKind::Executable, "test.exe".into(), symbols, sections)
+    }
+
+    /// Only words that can be pointers become data relocations.
+    #[test]
+    fn test_process_data_skips_non_pointer_data() {
+        let mut rdata = vec![0u8; 0x18];
+        // 0x00: byte jump table, 15 entries + 1 byte padding. its last word reads 0x82010010
+        rdata[0x0C..0x10].copy_from_slice(&[0x82, 0x01, 0x00, 0x10]);
+        // 0x10: real pointer into .text
+        rdata[0x10..0x14].copy_from_slice(&TEXT.wrapping_add(0x20).to_be_bytes());
+        // 0x14: byte field read with lbz, looks like an address
+        rdata[0x14..0x18].copy_from_slice(&[0x82, 0x01, 0x00, 0x00]);
+        let jump_table = ObjSymbol {
+            name: "jumptable_82000000".into(),
+            address: RDATA,
+            section: Some(0),
+            size: 0xF,
+            size_known: true,
+            kind: ObjSymbolKind::Object,
+            ..Default::default()
+        };
+        let obj = make_obj(rdata, vec![jump_table]);
+        let mut tracker = Tracker::new(&obj);
+        tracker
+            .data_types
+            .insert(SectionAddress::new(0, RDATA + 0x14), DataKind::Byte);
+        tracker.process_data(&obj, 0, &obj.sections[0]).unwrap();
+
+        let at = |offset: u32| {
+            tracker
+                .relocations
+                .get(&SectionAddress::new(0, RDATA + offset))
+        };
+        assert!(
+            at(0x0C).is_none(),
+            "word straddling the end of a jump table"
+        );
+        assert!(at(0x14).is_none(), "word holding a byte-accessed field");
+        assert!(
+            matches!(at(0x10), Some(Relocation::Absolute(RelocationTarget::Address(t))) if t.address == TEXT + 0x20),
+            "genuine pointer must still be relocated"
+        );
     }
 }
