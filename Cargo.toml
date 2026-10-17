@@ -3,7 +3,7 @@ name = "jeff"
 description = "An Xbox 360 decompilation toolkit."
 authors = ["rjkiv"]
 license = "MIT OR Apache-2.0"
-version = "0.5.2-tk.1"
+version = "0.5.2-tk.2"
 edition = "2024"
 publish = false
 repository = "https://github.com/rjkiv/jeff"
@@ -69,6 +69,7 @@ zerocopy = { version = "0.8", features = ["derive"] }
 pdb2 = "0.10.1"
 lzxd = "0.2.6"
 base64 = "0.23.1"
+msvc-demangler = "0.11"
 
 [target.'cfg(target_env = "musl")'.dependencies]
 mimalloc = "0.1"
